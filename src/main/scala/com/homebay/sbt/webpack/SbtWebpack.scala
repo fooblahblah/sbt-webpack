@@ -41,6 +41,8 @@ object SbtWebpack extends AutoPlugin {
     includeFilter in webpack := GlobFilter("*.js") || GlobFilter("*.jsx"),
     excludeFilter in webpack := HiddenFileFilter,
 
+    deduplicators += SbtWeb.selectFileFrom((target in webpack).value),
+
     (nodeModuleDirectories in webpack in Plugin) += baseDirectory.value / "node_modules",
 
     // TODO Currently can't use the webjar because there are a ton of transitive dependency issues. See
@@ -52,7 +54,7 @@ object SbtWebpack extends AutoPlugin {
 
     webpackStage := runWebpackStage.dependsOn(webJarsNodeModules in Assets).value,
 
-    resourceGenerators in Assets <+= webpack in Assets,
+  //  resourceGenerators in Assets <+= webpack in Assets,
     //resourceGenerators in TestAssets <+= webpack in TestAssets,
 
     resourceManaged in webpack := webTarget.value / webpack.key.label,
@@ -86,7 +88,7 @@ object SbtWebpack extends AutoPlugin {
     val buildMappings = mappings.map(o => outputDir / o._2)
 
     // FIXME support all of the arguments mentioned here: http://webpack.github.io/docs/cli.html
-    val args = Seq("--output-path", outputDir.getAbsolutePath)
+    val args = Seq("--debug", "--progress", "--output-path", outputDir.getAbsolutePath)
 
     // Running webpack as a node module for now
     val nodeModulePaths: Seq[String] = (nodeModuleDirectories in webpack in Plugin).value.map(_.getPath)
@@ -114,7 +116,25 @@ object SbtWebpack extends AutoPlugin {
 
 
   private def runWebpackStage: Def.Initialize[Task[Pipeline.Stage]] = Def.task { mappings =>
-    Nil
+    val outputDir = (resourceManaged in webpack).value
+
+    val include = (includeFilter in webpack).value
+    val exclude = (excludeFilter in webpack).value
+
+    val inputFiles = mappings.filter(f => !f._1.isDirectory && include.accept(f._1) && !exclude.accept(f._1)).map(_._1).toSet
+
+    val args = Seq("-p", "--optimize-dedupe", "--progress", "--output-path", outputDir.getAbsolutePath)
+
+    webpackRunner(inputFiles,
+                  outputDir,
+                  state.value,
+                  (engineType in webpack).value,
+                  (command in webpack).value,
+                  (nodeModuleDirectories in webpack in Plugin).value.map(_.getPath),
+                  webpackExecutable.value,
+                  (timeoutPerSource in webpack).value,
+                  streams.value.log,
+                  args).pair(f => Some(f.name))
   }
 
 
@@ -127,7 +147,7 @@ object SbtWebpack extends AutoPlugin {
                             webpackExecutable: File,
                             timeout: FiniteDuration,
                             logger: Logger,
-                            args: Seq[String]) = {
+                            args: Seq[String]): Set[File] = {
 
     if (inputFiles.size > 0) {
       logger.info(s"Optimizing ${inputFiles.size} Javascript file(s) with Webpack")
