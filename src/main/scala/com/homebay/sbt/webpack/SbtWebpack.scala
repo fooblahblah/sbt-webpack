@@ -6,12 +6,16 @@ import com.typesafe.sbt.web.SbtWeb
 import com.typesafe.sbt.web.pipeline.Pipeline
 import com.typesafe.sbt.jse.{SbtJsEngine, SbtJsTask}
 
+import scala.concurrent.duration.FiniteDuration
+
 object Import {
 
   val webpack = TaskKey[Seq[File]]("webpack", "Run the webpack module bundler.")
+  val webpackStage = TaskKey[Pipeline.Stage]("webpack-stage", "Run the webpack module bundler as a pipeline stage.")
 
   object WebpackKeys {
 
+    val webpackExecutable = SettingKey[File]("webpack-executable", "Webpack JS script")
     //val sourceDir = SettingKey[File]("webpack-source-dir", "The top level directory that contains your app js files. This is the source folder that webpack reads from.")
     //val buildDir = SettingKey[File]("webpack-build-dir", "Where webpack should will write to.")
   }
@@ -39,8 +43,14 @@ object SbtWebpack extends AutoPlugin {
 
     (nodeModuleDirectories in webpack in Plugin) += baseDirectory.value / "node_modules",
 
+    // TODO Currently can't use the webjar because there are a ton of transitive dependency issues. See
+    // https://groups.google.com/forum/#!topic/play-framework/m2X8NQFk5bk for a discussion on the topic
+    webpackExecutable := baseDirectory.value / "node_modules" / "webpack" / "bin" / "webpack.js",
+
     webpack := runWebpack(Assets).dependsOn(webJarsNodeModules in Assets).value,
     //webpack in TestAssets := runWebpack(TestAssets).dependsOn(webJarsNodeModules in Plugin).value,
+
+    webpackStage := runWebpackStage.dependsOn(webJarsNodeModules in Assets).value,
 
     resourceGenerators in Assets <+= webpack in Assets,
     //resourceGenerators in TestAssets <+= webpack in TestAssets,
@@ -81,36 +91,19 @@ object SbtWebpack extends AutoPlugin {
     // Running webpack as a node module for now
     val nodeModulePaths: Seq[String] = (nodeModuleDirectories in webpack in Plugin).value.map(_.getPath)
 
-    // TODO Currently can't use the webjar because there are a ton of transitive dependency issues. See
-    // https://groups.google.com/forum/#!topic/play-framework/m2X8NQFk5bk for a discussion on the topic
-    val webpackExecutable = baseDirectory.value / "node_modules" / "webpack" / "bin" / "webpack.js"
-
     val cacheDirectory = streams.value.cacheDirectory / webpack.key.label
+
     val runWebpack = FileFunction.cached(cacheDirectory, FilesInfo.hash) { inputFiles =>
-      streams.value.log.info(s"Optimizing ${inputFiles.size} Javascript file(s) with Webpack")
-
-      if (inputFiles.size > 0) {
-        try {
-
-          SbtJsTask.executeJs(
-            state.value,
-            (engineType in webpack).value,
-            (command in webpack).value,
-            nodeModulePaths,
-            webpackExecutable,
-            args,
-            (timeoutPerSource in webpack).value * inputFiles.size
-          )
-        } catch {
-
-          // FIXME get error handling to work
-          case failure: SbtJsTask.JsTaskFailure =>
-            failure.printStackTrace()
-          //CompileProblems.report(reporter.value, problems)
-        }
-      }
-
-      outputDir.***.get.filter(!_.isDirectory).toSet
+      webpackRunner(inputFiles,
+                    outputDir,
+                    state.value,
+                    (engineType in webpack).value,
+                    (command in webpack).value,
+                    nodeModulePaths,
+                    webpackExecutable.value,
+                    (timeoutPerSource in webpack).value,
+                    streams.value.log,
+                    args)
     }
 
     val webpackedMappings = runWebpack(buildMappings.toSet).pair(relativeTo(outputDir))
@@ -119,4 +112,47 @@ object SbtWebpack extends AutoPlugin {
     webpackedMappings.map(_._1)
   }
 
+
+  private def runWebpackStage: Def.Initialize[Task[Pipeline.Stage]] = Def.task { mappings =>
+    Nil
+  }
+
+
+  private def webpackRunner(inputFiles: Set[File],
+                            outputDir: File,
+                            state: State,
+                            engineType: EngineType.Value,
+                            command: Option[File],
+                            nodeModulePaths: Seq[String],
+                            webpackExecutable: File,
+                            timeout: FiniteDuration,
+                            logger: Logger,
+                            args: Seq[String]) = {
+
+    if (inputFiles.size > 0) {
+      logger.info(s"Optimizing ${inputFiles.size} Javascript file(s) with Webpack")
+
+      try {
+
+        SbtJsTask.executeJs(
+          state,
+          engineType,
+          command,
+          nodeModulePaths,
+          webpackExecutable,
+          args,
+          timeout * inputFiles.size
+        )
+      } catch {
+
+        // FIXME get error handling to work
+        case failure: SbtJsTask.JsTaskFailure =>
+          failure.printStackTrace()
+        //CompileProblems.report(reporter.value, problems)
+      }
+    }
+
+    outputDir.***.get.filter(!_.isDirectory).toSet
+
+  }
 }
